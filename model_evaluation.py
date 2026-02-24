@@ -1,6 +1,6 @@
 """
 =============================================================================
-COMP 262 - Phase 1 | PERSON 3: ML / Validation Lead
+COMP 262 - Phase 1 | Sherwayne 3: ML / Validation Lead
 Task: Lexicon Sentiment Modeling + Evaluation
 Dataset: Amazon Industrial & Scientific Reviews (1,000-review sample)
 =============================================================================
