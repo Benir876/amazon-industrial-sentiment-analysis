@@ -1,6 +1,6 @@
 """
 =============================================================================
-COMP 262 - Phase 1 | PERSON 2: NLP Specialist
+COMP 262 - Phase 1 | Luis Mateo Sanchez: NLP Specialist
 Task: Text Pre-processing & Labeling
 Dataset: Amazon Industrial & Scientific Reviews
 =============================================================================
