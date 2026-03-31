@@ -25,7 +25,7 @@ sns.set_theme(style="whitegrid", palette="muted")
 plt.rcParams["figure.dpi"] = 120
 
 # ── Paths ───────────────────────────────────────────────────────────────────
-RAW_DATA_PATH   = Path("Industrial_and_Scientific_5.json/Industrial_and_Scientific_5.json")   # 5-core
+RAW_DATA_PATH   = Path("data/raw/Industrial_and_Scientific.json.gz")   # Full
 OUTPUT_FIGURES  = Path("results/figures")
 OUTPUT_PROCESSED= Path("data/processed")
 
@@ -37,18 +37,22 @@ OUTPUT_PROCESSED.mkdir(parents=True, exist_ok=True)
 # 1. DATA LOADING
 # ============================================================================
 
-def load_amazon_reviews(filepath: Path) -> pd.DataFrame:
+def load_amazon_reviews(filepath: Path, nrows: int = 50000) -> pd.DataFrame:
     """
-    Load Amazon review JSON-gz file into a DataFrame.
+    Load Amazon review JSON(.gz) file into a DataFrame (sampled for memory safety).
     Supports both .json.gz and plain .json files.
     """
     records = []
     opener = gzip.open if str(filepath).endswith(".gz") else open
+
     with opener(filepath, "rt", encoding="utf-8") as f:
-        for line in f:
+        for i, line in enumerate(f):
+            if i >= nrows:
+                break
             records.append(json.loads(line.strip()))
+
     df = pd.DataFrame(records)
-    print(f"[INFO] Loaded {len(df):,} reviews from {filepath.name}")
+    print(f"[INFO] Loaded {len(df):,} reviews (sample)")
     return df
 
 
@@ -317,7 +321,7 @@ def save_base_dataframe(df: pd.DataFrame) -> None:
 
 if __name__ == "__main__":
     # --- Load ---
-    df = load_amazon_reviews(RAW_DATA_PATH)
+    df = load_amazon_reviews(RAW_DATA_PATH, nrows=50000)  
 
     # --- Audit ---
     initial_audit(df)

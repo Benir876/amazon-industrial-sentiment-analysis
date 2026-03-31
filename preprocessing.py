@@ -1,30 +1,32 @@
 """
 =============================================================================
-COMP 262 - Phase 1 | Luis Mateo Sanchez: NLP Specialist
+COMP 262 - Phase 1 / Phase 2 
 Task: Text Pre-processing & Labeling
 Dataset: Amazon Industrial & Scientific Reviews
 =============================================================================
-Deliverables covered:
+This script now supports BOTH phases:
+
+Phase 1 deliverables covered:
   - Deliverable 2a: Label data (Positive / Neutral / Negative)
   - Deliverable 2b: Column selection with justification
   - Deliverable 2c: Outlier check on text
   - Deliverable 4:  Pre-process text for VADER and TextBlob
-                    (with per-model justification)
   - Deliverable 5:  Random sample of 1,000 reviews
+
+Phase 2 support added:
+  - Create a stratified subset for Machine Learning experiments
+  - Create an ML-ready text column
+  - Save outputs dedicated to Phase 2 modelling
 =============================================================================
-COLUMN SELECTION RATIONALE (Deliverable 2b):
-  - 'reviewText' : The primary free-form customer review. Contains the richest
-    sentiment signal—opinions, descriptions, and emotional cues.
-  - 'summary'    : A short headline written by the reviewer. Often contains
-    concentrated sentiment (e.g. "Terrible quality", "Best buy ever").
-    Useful as a secondary/boosting signal.
-  - 'overall'    : The numeric star rating used ONLY for ground-truth labeling.
-    NOT fed into the lexicon models (that would be leakage).
+COLUMN SELECTION RATIONALE:
+  - 'reviewText' : Main free-form review body with the richest sentiment signal.
+  - 'summary'    : Short headline that often carries concentrated sentiment.
+  - 'overall'    : Numeric star rating used only for ground-truth labeling.
   - 'asin', 'reviewerID' : Retained as identifiers for traceability.
 
   Columns excluded:
-  - 'unverified', 'vote', 'image', 'style' : metadata with no direct
-    sentiment text content relevant for this phase.
+  - 'verified', 'vote', 'image', 'style' : metadata not directly required for
+    text sentiment modelling in this project stage.
 =============================================================================
 """
 
@@ -57,6 +59,8 @@ INPUT_PATH       = Path("data/processed/base_reviews.csv")   # from Person 1
 OUTPUT_PROCESSED = Path("data/processed")
 OUTPUT_FIGURES   = Path("results/figures")
 RANDOM_SEED      = 42
+PHASE1_SAMPLE_SIZE = 1000
+PHASE2_SAMPLE_SIZE = 3000
 
 STOP_WORDS = set(stopwords.words("english"))
 LEMMATIZER = WordNetLemmatizer()
@@ -268,12 +272,46 @@ def preprocess_for_textblob(text: str, summary: str = "") -> str:
     return " ".join(tokens)
 
 
+# ---------------- 4C. ML preprocessing ----------------
+# ML RATIONALE:
+#   For TF-IDF + Logistic Regression / Naive Bayes we want a normalized text
+#   representation with reduced noise and a compact vocabulary:
+#     ✔ Lowercase
+#     ✔ Remove HTML tags and URLs
+#     ✔ Remove punctuation / digits
+#     ✔ Remove stop words while preserving negations
+#     ✔ Lemmatise tokens
+#   This output becomes the dedicated feature text for vectorisation.
+
+def preprocess_for_ml(text: str, summary: str = "") -> str:
+    """
+    Cleaning pipeline for classic ML models using TF-IDF features.
+    """
+    if pd.isna(text):
+        text = ""
+    if pd.isna(summary):
+        summary = ""
+
+    combined = f"{summary} {text}".strip().lower()
+    combined = re.sub(r"<[^>]+>", " ", combined)
+    combined = re.sub(r"http\S+|www\.\S+", " ", combined)
+    combined = re.sub(r"[^a-z\s]", " ", combined)
+
+    tokens = word_tokenize(combined)
+    tokens = [t for t in tokens if t not in STOP_WORDS_NO_NEGATION]
+    tokens = [LEMMATIZER.lemmatize(t) for t in tokens if len(t) > 1]
+
+    return " ".join(tokens)
+
+
 # ============================================================================
 # 5. APPLY PIPELINES TO DATAFRAME
 # ============================================================================
 
 def apply_preprocessing(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply both pipelines and add columns to the DataFrame."""
+    """Apply all pipelines, add feature columns, and drop ML-empty rows."""
+    df = df.copy()
+
     print("\n[INFO] Applying VADER preprocessing ...")
     df["text_vader"] = df.apply(
         lambda r: preprocess_for_vader(r["reviewText"], r.get("summary", "")), axis=1
@@ -284,12 +322,24 @@ def apply_preprocessing(df: pd.DataFrame) -> pd.DataFrame:
         lambda r: preprocess_for_textblob(r["reviewText"], r.get("summary", "")), axis=1
     )
 
+    print("[INFO] Applying ML preprocessing ...")
+    df["text_ml"] = df.apply(
+        lambda r: preprocess_for_ml(r["reviewText"], r.get("summary", "")), axis=1
+    )
+
     # Length after preprocessing (sanity check)
     df["vader_word_len"]    = df["text_vader"].str.split().str.len()
     df["textblob_word_len"] = df["text_textblob"].str.split().str.len()
+    df["ml_word_len"]       = df["text_ml"].str.split().str.len()
+
+    before = len(df)
+    df = df[df["ml_word_len"] > 0].copy()
+    after = len(df)
+    print(f"[INFO] Dropped {before - after:,} rows with empty ML text after cleaning.")
 
     print(f"\n  VADER    avg token length : {df['vader_word_len'].mean():.1f}")
     print(f"  TextBlob avg token length : {df['textblob_word_len'].mean():.1f}")
+    print(f"  ML       avg token length : {df['ml_word_len'].mean():.1f}")
 
     return df
 
@@ -298,32 +348,52 @@ def apply_preprocessing(df: pd.DataFrame) -> pd.DataFrame:
 # 6. RANDOM SAMPLE OF 1,000 REVIEWS  (Deliverable 5)
 # ============================================================================
 
+def _stratified_sample(df: pd.DataFrame, sample_size: int, seed: int = RANDOM_SEED) -> pd.DataFrame:
+    """
+    Create a stratified sample preserving the sentiment class proportions.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
+    sample = (
+        df.groupby("sentiment_label", group_keys=False)
+        .apply(lambda x: x.sample(
+            n=min(len(x), int(sample_size * len(x) / len(df))),
+            random_state=seed
+        ))
+    )
+
+    if len(sample) < sample_size:
+        remaining = df.drop(sample.index).sample(sample_size - len(sample), random_state=seed)
+        sample = pd.concat([sample, remaining])
+
+    sample = sample.sample(frac=1, random_state=seed).reset_index(drop=True)
+    return sample
+
+
 def sample_1000(df: pd.DataFrame, seed: int = RANDOM_SEED) -> pd.DataFrame:
     """
     Deliverable 5: Stratified random sample of 1,000 reviews,
     proportional to the class distribution to avoid severe imbalance.
     """
-    random.seed(seed)
-    np.random.seed(seed)
-
-    # Stratified sample to maintain class ratios
-    sample = (
-        df.groupby("sentiment_label", group_keys=False)
-        .apply(lambda x: x.sample(
-            n=min(len(x), int(1000 * len(x) / len(df))),
-            random_state=seed
-        ))
-    )
-
-    # If slightly under 1000 due to rounding, top-up randomly
-    if len(sample) < 1000:
-        remaining = df.drop(sample.index).sample(1000 - len(sample), random_state=seed)
-        sample = pd.concat([sample, remaining])
-
-    sample = sample.sample(frac=1, random_state=seed).reset_index(drop=True)  # shuffle
+    sample = _stratified_sample(df, sample_size=PHASE1_SAMPLE_SIZE, seed=seed)
 
     print("\n" + "="*60)
-    print(f"STRATIFIED SAMPLE — 1,000 reviews  (seed={seed})")
+    print(f"STRATIFIED SAMPLE — {PHASE1_SAMPLE_SIZE:,} reviews  (seed={seed})")
+    print("="*60)
+    print(sample["sentiment_label"].value_counts())
+
+    return sample
+
+
+def sample_phase2_subset(df: pd.DataFrame, seed: int = RANDOM_SEED) -> pd.DataFrame:
+    """
+    Create the Phase 2 stratified subset for ML experiments.
+    """
+    sample = _stratified_sample(df, sample_size=PHASE2_SAMPLE_SIZE, seed=seed)
+
+    print("\n" + "="*60)
+    print(f"STRATIFIED SAMPLE — {PHASE2_SAMPLE_SIZE:,} reviews for Phase 2  (seed={seed})")
     print("="*60)
     print(sample["sentiment_label"].value_counts())
 
@@ -334,15 +404,22 @@ def sample_1000(df: pd.DataFrame, seed: int = RANDOM_SEED) -> pd.DataFrame:
 # 7. SAVE OUTPUTS
 # ============================================================================
 
-def save_outputs(df_full: pd.DataFrame, df_sample: pd.DataFrame) -> None:
-    full_path   = OUTPUT_PROCESSED / "preprocessed_full.csv"
-    sample_path = OUTPUT_PROCESSED / "sample_1000.csv"
+def save_outputs(
+    df_full: pd.DataFrame,
+    df_sample_phase1: pd.DataFrame,
+    df_sample_phase2: pd.DataFrame,
+) -> None:
+    full_path         = OUTPUT_PROCESSED / "preprocessed_full.csv"
+    sample_phase1_path = OUTPUT_PROCESSED / "sample_1000.csv"
+    sample_phase2_path = OUTPUT_PROCESSED / "phase2_subset_3000.csv"
 
     df_full.to_csv(full_path, index=False)
-    df_sample.to_csv(sample_path, index=False)
+    df_sample_phase1.to_csv(sample_phase1_path, index=False)
+    df_sample_phase2.to_csv(sample_phase2_path, index=False)
 
     print(f"\n[SAVED] Full preprocessed dataset → {full_path}  ({len(df_full):,} rows)")
-    print(f"[SAVED] 1,000-review sample         → {sample_path}")
+    print(f"[SAVED] 1,000-review sample         → {sample_phase1_path}")
+    print(f"[SAVED] Phase 2 subset (3,000)     → {sample_phase2_path}")
 
 
 # ============================================================================
@@ -365,13 +442,17 @@ if __name__ == "__main__":
     # 5. Apply preprocessing pipelines
     df = apply_preprocessing(df)
 
-    # 6. Draw the 1,000-review sample
-    sample = sample_1000(df)
+    # 6. Draw the 1,000-review sample for Phase 1
+    sample_phase1 = sample_1000(df)
 
-    # 7. Save
-    save_outputs(df, sample)
+    # 7. Draw the 3,000-review subset for Phase 2
+    sample_phase2 = sample_phase2_subset(df)
+
+    # 8. Save
+    save_outputs(df, sample_phase1, sample_phase2)
 
     print("\n✅  Person 2 complete.")
     print("    Outputs:")
     print("      data/processed/preprocessed_full.csv")
     print("      data/processed/sample_1000.csv")
+    print("      data/processed/phase2_subset_3000.csv")
